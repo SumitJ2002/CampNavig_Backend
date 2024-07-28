@@ -5,10 +5,13 @@ from flask_cors import CORS
 import folium
 from folium import plugins
 
+import firebase_admin
+from firebase_admin import credentials, db
+
 import os
 import json
 import sqlite3
-import secrets
+import secrets  
 
 app = Flask(__name__)
 CORS(app)
@@ -18,36 +21,10 @@ secret_key = secrets.token_hex(24)
 app.secret_key = secret_key  # Change this to a random secret key
 bcrypt = Bcrypt(app)
 
-# Function to create the users table in the SQLite database
-def create_table():
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        fullname TEXT NOT NULL,
-        username TEXT NOT NULL UNIQUE,
-        email TEXT NOT NULL UNIQUE,
-        password TEXT NOT NULL
-    )
-    ''')
-    conn.commit()
-    conn.close()
-
-create_table()
-
-# Connect to the SQLite database
-def seating_arrangement():
-  conn = sqlite3.connect('seating_arrangement.db', check_same_thread=False)
-  cursor = conn.cursor()
-
-  # Create a table to store the seating arrangement
-  cursor.execute('''CREATE TABLE IF NOT EXISTS seating_arrangement
-                  (row INTEGER, col INTEGER, name TEXT, roll_number TEXT)''')
-  conn.commit()
-  conn.close()
-
-seating_arrangement()
+cred = credentials.Certificate('credentials.json')
+firebase_admin.initialize_app(cred, {
+    'databaseURL': 'https://campnavig-default-rtdb.firebaseio.com/'
+})
 
 class navigator:
     def __init__(self):
@@ -515,6 +492,27 @@ myNavigator = navigator()
 myIndoorNavigator = indoorNavigator()
 
 # Endpoint for user registration
+# @app.route('/register', methods=['POST'])
+# def register():
+#     data = request.json
+#     fullname = data.get('fullname')
+#     username = data.get('username')
+#     email = data.get('email')
+#     password = data.get('password')
+
+#     hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
+
+#     conn = sqlite3.connect('users.db')
+#     cursor = conn.cursor()
+#     try:
+#         cursor.execute('INSERT INTO users (fullname, username, email, password) VALUES (?, ?, ?, ?)',
+#                        (fullname, username, email, hashed_password))
+#         conn.commit()
+#         return jsonify({'message': 'User registered successfully'}),200
+#     except sqlite3.IntegrityError:
+#         return jsonify({'error': 'Username or Email already exists'}),404
+#     finally:
+#         conn.close()
 @app.route('/register', methods=['POST'])
 def register():
     data = request.json
@@ -525,60 +523,118 @@ def register():
 
     hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
 
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
+    user_data = {
+        'fullname': fullname,
+        'username': username,
+        'email': email,
+        'password': hashed_password
+    }
+
     try:
-        cursor.execute('INSERT INTO users (fullname, username, email, password) VALUES (?, ?, ?, ?)',
-                       (fullname, username, email, hashed_password))
-        conn.commit()
-        return jsonify({'message': 'User registered successfully'}),200
-    except sqlite3.IntegrityError:
-        return jsonify({'error': 'Username or Email already exists'}),404
-    finally:
-        conn.close()
+        users_ref = db.reference('users')
+        existing_user_by_username = users_ref.order_by_child('username').equal_to(username).get()
+        if existing_user_by_username:
+            return jsonify({'error': 'Username already exists'}), 400
+        
+        ref = db.reference('users')
+        new_user_ref = ref.push()
+        new_user_ref.set(user_data)
+        return jsonify({'message': 'User registered successfully'}), 200
+    
+    except Exception as e:
+        # Handle potential Firebase errors
+        print(e)
+        return jsonify({'error': 'Error registering user'}), 500
 
 # Endpoint for user login
+# @app.route('/login', methods=['POST'])
+# def login():
+#     data = request.json
+#     username = data.get('username')
+#     password = data.get('password')
+
+#     conn = sqlite3.connect('users.db')
+#     cursor = conn.cursor()
+#     cursor.execute('SELECT * FROM users WHERE username = ?', (username,))
+#     user = cursor.fetchone()
+#     conn.close()
+
+#     if user and bcrypt.check_password_hash(user[4], password):
+#         session['username'] = username
+#         return jsonify({'message': 'Login Successful'}),200
+#     else:
+#         return jsonify({'error': 'Invalid Username or Password'}),404
 @app.route('/login', methods=['POST'])
 def login():
     data = request.json
     username = data.get('username')
     password = data.get('password')
 
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users WHERE username = ?', (username,))
-    user = cursor.fetchone()
-    conn.close()
-
-    if user and bcrypt.check_password_hash(user[4], password):
-        session['username'] = username
-        return jsonify({'message': 'Login Successful'}),200
-    else:
-        return jsonify({'error': 'Invalid Username or Password'}),404
+    try:
+        users_ref = db.reference('users')
+        users_snapshot = users_ref.order_by_child('username').equal_to(username).get()
+        if users_snapshot and len(users_snapshot) == 1:
+            user_data = list(users_snapshot.values())[0]
+            stored_password = user_data.get('password')
+            if bcrypt.check_password_hash(stored_password, password):
+                # Consider creating a custom authentication token or using Firebase Authentication
+                session['username'] = username
+                return jsonify({'message': 'Login Successful'}), 200
+            else:
+                return jsonify({'error': 'Invalid Password'}), 401
+        else:
+            return jsonify({'error': 'User not found'}), 404
+    except Exception as e:
+        print(e)
+        return jsonify({'error': 'Login failed'}), 500
     
 
 # Endpoint for fetching dashboard data
+# @app.route('/dashboard', methods=['GET'])
+# def get_dashboard_data():
+#     # Check if user is logged in
+#     if 'username' in session:
+#         conn = sqlite3.connect('users.db')
+#         cursor = conn.cursor()
+#         username = session['username']
+#         cursor.execute('SELECT fullname, email FROM users WHERE username = ?', (username,))
+#         user_data = cursor.fetchone()
+#         conn.close()
+
+#         if user_data:
+#             fullname, email = user_data
+#             dashboard_data = {
+#                 'fullname': fullname,
+#                 'email': email,
+#                 'message': 'Welcome to the dashboard!'
+#             }
+#             return jsonify(dashboard_data), 200
+#         else:
+#             return jsonify({'error': 'User data not found'}), 404
+#     else:
+#         return jsonify({'error': 'User not logged in'}), 401
 @app.route('/dashboard', methods=['GET'])
 def get_dashboard_data():
     # Check if user is logged in
     if 'username' in session:
-        conn = sqlite3.connect('users.db')
-        cursor = conn.cursor()
-        username = session['username']
-        cursor.execute('SELECT fullname, email FROM users WHERE username = ?', (username,))
-        user_data = cursor.fetchone()
-        conn.close()
-
-        if user_data:
-            fullname, email = user_data
-            dashboard_data = {
-                'fullname': fullname,
-                'email': email,
-                'message': 'Welcome to the dashboard!'
-            }
-            return jsonify(dashboard_data), 200
-        else:
-            return jsonify({'error': 'User data not found'}), 404
+        try:
+            users_ref = db.reference('users')
+            users_snapshot = users_ref.order_by_child('username').equal_to(session['username']).get()
+            if users_snapshot and len(users_snapshot) == 1:
+                user_data = list(users_snapshot.values())[0]
+                fullname = user_data.get('fullname')
+                email = user_data.get('email')
+                dashboard_data = {
+                    'fullname': fullname,
+                    'email': email,
+                    'message': 'Welcome to the dashboard!'
+                }
+                return jsonify(dashboard_data), 200
+            else:
+                return jsonify({'error': 'User data not found'}), 404
+        except Exception as e:
+            print(e)
+            return jsonify({'error': 'Error fetching user data'}), 500
     else:
         return jsonify({'error': 'User not logged in'}), 401
 
@@ -684,63 +740,128 @@ def show_indoor_map():
         hospitalMap = myIndoorNavigator.redrawMap()
         return jsonify({'map': hospitalMap, 'message': None})
     
+# @app.route('/seats', methods=['GET'])
+# def get_seats():
+#     conn = sqlite3.connect('seating_arrangement.db', check_same_thread=False)
+#     cursor = conn.cursor()
+#     cursor.execute("SELECT row, col, name, roll_number FROM seating_arrangement")
+#     seats = cursor.fetchall()
+#     seating_arrangement = [[None for _ in range(5)] for _ in range(5)]
+#     for row, col, name, roll_number in seats:
+#         seating_arrangement[row][col] = {'name': name, 'rollNumber': roll_number}
+#     return jsonify(seating_arrangement)
 @app.route('/seats', methods=['GET'])
 def get_seats():
-    conn = sqlite3.connect('seating_arrangement.db', check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute("SELECT row, col, name, roll_number FROM seating_arrangement")
-    seats = cursor.fetchall()
-    seating_arrangement = [[None for _ in range(5)] for _ in range(5)]
-    for row, col, name, roll_number in seats:
-        seating_arrangement[row][col] = {'name': name, 'rollNumber': roll_number}
-    return jsonify(seating_arrangement)
+    try:
+        seats_ref = db.reference('seating_arrangement')
+        seats_data = seats_ref.get()
 
+        seating_arrangement = [[None for _ in range(5)] for _ in range(5)]
+        for seat_data in seats_data.values():
+            row = seat_data.get('row')
+            col = seat_data.get('col')
+            seating_arrangement[row][col] = {'name': seat_data.get('name'), 'rollNumber': seat_data.get('roll_number')}
+
+        return jsonify(seating_arrangement)
+    except Exception as e:
+        print(e)
+        return jsonify({'error': 'Failed to fetch seating arrangement'}), 500
+
+# @app.route('/seats', methods=['POST'])
+# def reserve_seat():
+#     conn = sqlite3.connect('seating_arrangement.db', check_same_thread=False)
+#     cursor = conn.cursor()
+#     data = request.get_json()
+#     row = data.get('row')
+#     col = data.get('col')
+#     name = data.get('name')
+#     roll_number = data.get('rollNumber')
+
+#     cursor.execute("SELECT * FROM seating_arrangement WHERE row = ? AND col = ?", (row, col))
+#     existing_seat = cursor.fetchone()
+
+#     if existing_seat is None:
+#         cursor.execute("INSERT INTO seating_arrangement VALUES (?, ?, ?, ?)", (row, col, name, roll_number))
+#         conn.commit()
+#         return jsonify({'message': 'Seat reserved successfully'})
+#     else:
+#         return jsonify({'error': 'Seat is already occupied'}), 400
 @app.route('/seats', methods=['POST'])
 def reserve_seat():
-    conn = sqlite3.connect('seating_arrangement.db', check_same_thread=False)
-    cursor = conn.cursor()
     data = request.get_json()
     row = data.get('row')
     col = data.get('col')
     name = data.get('name')
     roll_number = data.get('rollNumber')
 
-    cursor.execute("SELECT * FROM seating_arrangement WHERE row = ? AND col = ?", (row, col))
-    existing_seat = cursor.fetchone()
+    try:
+        seats_ref = db.reference('seating_arrangement')
+        seat_ref = seats_ref.child(f"{row}_{col}")  # Create a unique seat ID
+        seat_data = seat_ref.get()
 
-    if existing_seat is None:
-        cursor.execute("INSERT INTO seating_arrangement VALUES (?, ?, ?, ?)", (row, col, name, roll_number))
-        conn.commit()
+        if seat_data:
+            return jsonify({'error': 'Seat is already occupied'}), 400
+
+        seat_ref.set({
+            'name': name,
+            'rollNumber': roll_number
+        })
+
         return jsonify({'message': 'Seat reserved successfully'})
-    else:
-        return jsonify({'error': 'Seat is already occupied'}), 400
+    except Exception as e:
+        print(e)
+        return jsonify({'error': 'Error reserving seat'}), 500
 
+# @app.route('/seats/<int:row>/<int:col>', methods=['DELETE'])
+# def release_seat(row, col):
+#     conn = sqlite3.connect('seating_arrangement.db', check_same_thread=False)
+#     cursor = conn.cursor()
+#     cursor.execute("SELECT * FROM seating_arrangement WHERE row = ? AND col = ?", (row, col))
+#     existing_seat = cursor.fetchone()
+
+#     if existing_seat is not None:
+#         cursor.execute("DELETE FROM seating_arrangement WHERE row = ? AND col = ?", (row, col))
+#         conn.commit()
+#         return jsonify({'message': 'Seat released successfully'})
+#     else:
+#         return jsonify({'error': 'Seat is already vacant'}), 400
 @app.route('/seats/<int:row>/<int:col>', methods=['DELETE'])
 def release_seat(row, col):
-    conn = sqlite3.connect('seating_arrangement.db', check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM seating_arrangement WHERE row = ? AND col = ?", (row, col))
-    existing_seat = cursor.fetchone()
-
-    if existing_seat is not None:
-        cursor.execute("DELETE FROM seating_arrangement WHERE row = ? AND col = ?", (row, col))
-        conn.commit()
+    try:
+        seats_ref = db.reference('seating_arrangement')
+        seat_ref = seats_ref.child(f"{row}_{col}")
+        seat_ref.delete()
         return jsonify({'message': 'Seat released successfully'})
-    else:
-        return jsonify({'error': 'Seat is already vacant'}), 400
+    except Exception as e:
+        print(e)
+        return jsonify({'error': 'Error releasing seat'}), 500
 
+# @app.route('/seats/<int:row>/<int:col>', methods=['GET'])
+# def get_seat(row, col):
+#     conn = sqlite3.connect('seating_arrangement.db', check_same_thread=False)
+#     cursor = conn.cursor()
+#     cursor.execute("SELECT name, roll_number FROM seating_arrangement WHERE row = ? AND col = ?", (row, col))
+#     seat = cursor.fetchone()
+
+#     if seat is not None:
+#         name, roll_number = seat
+#         return jsonify({'name': name, 'rollNumber': roll_number})
+#     else:
+#         return jsonify({'message': 'Seat is vacant'}), 404
 @app.route('/seats/<int:row>/<int:col>', methods=['GET'])
 def get_seat(row, col):
-    conn = sqlite3.connect('seating_arrangement.db', check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute("SELECT name, roll_number FROM seating_arrangement WHERE row = ? AND col = ?", (row, col))
-    seat = cursor.fetchone()
+    try:
+        seats_ref = db.reference('seating_arrangement')
+        seat_ref = seats_ref.child(f"{row}_{col}")
+        seat_data = seat_ref.get()
 
-    if seat is not None:
-        name, roll_number = seat
-        return jsonify({'name': name, 'rollNumber': roll_number})
-    else:
-        return jsonify({'message': 'Seat is vacant'}), 404
+        if seat_data:
+            return jsonify(seat_data)
+        else:
+            return jsonify({'message': 'Seat is vacant'})
+    except Exception as e:
+        print(e)
+        return jsonify({'error': 'Failed to fetch seat'}), 500
 
 if __name__ == '__main__':
     app.run(debug=True,host='0.0.0.0')
